@@ -8,16 +8,16 @@ const {
   Partials,
   REST,
   Routes,
+  PermissionFlagsBits,
 } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { commands, attachmentOptionNames } = require('./commands');
+const { getConfig, updateConfig } = require('./config-store');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
-const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 10000);
-const MAX_ATTACHMENT_BYTES = Number(process.env.MAX_ATTACHMENT_BYTES || 8 * 1024 * 1024);
 
 if (!DISCORD_TOKEN) {
   console.error('Configure a variavel de ambiente DISCORD_TOKEN antes de iniciar.');
@@ -121,19 +121,30 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  if (interaction.commandName !== 'chat') {
+  if (interaction.commandName === 'chat') {
+    await handleChatCommand(interaction);
     return;
   }
 
-  const prompt = interaction.options.getString('mensagem', true).trim();
-  const useGrounding = interaction.options.getBoolean('usar_grounding') ?? false;
+  if (interaction.commandName === 'configurar') {
+    await handleConfigureCommand(interaction);
+  }
+});
+
+async function handleChatCommand(interaction) {
+  const config = getConfig();
+  const { rateLimitMs, maxAttachmentBytes } = config;
+
+  const prompt = (interaction.options.getString('mensagem') || '').trim();
+  const pesquisaWeb = interaction.options.getString('pesquisa_web');
+  const useGrounding = pesquisaWeb === 'ativar';
   const attachments = attachmentOptionNames
     .map(name => interaction.options.getAttachment(name))
     .filter(Boolean);
 
   if (!prompt && attachments.length === 0) {
     await interaction.reply({
-      content: 'Envie uma mensagem ou anexe um arquivo valido para conversar com o modelo.',
+      content: 'Envie uma mensagem ou anexe um arquivo válido para conversar com o modelo.',
       ephemeral: true,
     });
     return;
@@ -141,9 +152,9 @@ client.on(Events.InteractionCreate, async interaction => {
 
   for (const file of attachments) {
     const mimeType = inferMimeType(file.name, file.contentType);
-    if (file.size && file.size > MAX_ATTACHMENT_BYTES) {
+    if (file.size && file.size > maxAttachmentBytes) {
       await interaction.reply({
-        content: `O arquivo ${file.name} excede o limite de ${(MAX_ATTACHMENT_BYTES / 1024 / 1024).toFixed(
+        content: `O arquivo ${file.name} excede o limite de ${(maxAttachmentBytes / 1024 / 1024).toFixed(
           1
         )} MB.`,
         ephemeral: true,
@@ -153,7 +164,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (!isSupportedMime(mimeType)) {
       await interaction.reply({
-        content: `O tipo de arquivo ${mimeType} nao e suportado. Envie imagens ou PDFs.`,
+        content: `O tipo de arquivo ${mimeType} não é suportado. Envie imagens ou PDFs.`,
         ephemeral: true,
       });
       return;
@@ -164,8 +175,8 @@ client.on(Events.InteractionCreate, async interaction => {
   const lastRequest = cooldowns.get(interaction.user.id) || 0;
   const elapsed = now - lastRequest;
 
-  if (elapsed < RATE_LIMIT_MS) {
-    const waitSeconds = Math.ceil((RATE_LIMIT_MS - elapsed) / 1000);
+  if (elapsed < rateLimitMs) {
+    const waitSeconds = Math.ceil((rateLimitMs - elapsed) / 1000);
     await interaction.reply({
       content: `Aguarde ${waitSeconds}s antes de enviar outra mensagem.`,
       ephemeral: true,
@@ -196,8 +207,8 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const arrayBuffer = await downloadResponse.arrayBuffer();
-      if (arrayBuffer.byteLength > MAX_ATTACHMENT_BYTES) {
-        throw new Error(`O arquivo ${file.name} excede o limite permitido apos o download.`);
+      if (arrayBuffer.byteLength > maxAttachmentBytes) {
+        throw new Error(`O arquivo ${file.name} excede o limite permitido após o download.`);
       }
 
       const base64Data = Buffer.from(arrayBuffer).toString('base64');
@@ -228,7 +239,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (!replyText) {
-      replyText = 'Nao consegui gerar uma resposta agora.';
+      replyText = 'Não consegui gerar uma resposta agora.';
     }
 
     const candidate = response?.candidates?.[0];
@@ -269,7 +280,93 @@ client.on(Events.InteractionCreate, async interaction => {
       // Ignora falhas ao responder erros.
     }
   }
-});
+}
+
+async function handleConfigureCommand(interaction) {
+  const memberPermissions = interaction.memberPermissions;
+  const hasAdminPermission = memberPermissions?.has(PermissionFlagsBits.Administrator);
+
+  if (!hasAdminPermission) {
+    await interaction.reply({
+      content: 'Apenas administradores podem alterar as configurações do bot.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const subcommand = interaction.options.getSubcommand();
+
+  if (subcommand === 'ver') {
+    const config = getConfig();
+    const summary =
+      `Intervalo mínimo entre mensagens: ${(config.rateLimitMs / 1000).toFixed(1)}s\n` +
+      `Tamanho máximo dos anexos: ${(config.maxAttachmentBytes / 1024 / 1024).toFixed(1)} MB`;
+
+    await interaction.reply({ content: summary, ephemeral: true });
+    return;
+  }
+
+  if (subcommand === 'definir') {
+    const currentConfig = getConfig();
+    const intervalSeconds = interaction.options.getInteger('intervalo_segundos');
+    const maxAttachmentMb = interaction.options.getNumber('tamanho_max_mb');
+
+    if (intervalSeconds === null && maxAttachmentMb === null) {
+      await interaction.reply({
+        content: 'Informe pelo menos um parâmetro para atualizar (intervalo ou tamanho máximo).',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const updates = {};
+    let rateLimitChanged = false;
+
+    if (intervalSeconds !== null) {
+      const nextRateLimitMs = intervalSeconds * 1000;
+      if (nextRateLimitMs !== currentConfig.rateLimitMs) {
+        updates.rateLimitMs = nextRateLimitMs;
+        rateLimitChanged = true;
+      }
+    }
+
+    if (maxAttachmentMb !== null) {
+      const nextMaxBytes = Math.round(maxAttachmentMb * 1024 * 1024);
+      if (nextMaxBytes !== currentConfig.maxAttachmentBytes) {
+        updates.maxAttachmentBytes = nextMaxBytes;
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      await interaction.reply({
+        content: 'Os valores informados são iguais aos atuais; nada foi alterado.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    try {
+      const newConfig = updateConfig(updates);
+
+      if (rateLimitChanged) {
+        cooldowns.clear();
+      }
+
+      const responseMessage =
+        'Configurações atualizadas com sucesso:\n' +
+        `• Intervalo mínimo: ${(newConfig.rateLimitMs / 1000).toFixed(1)}s\n` +
+        `• Tamanho máximo dos anexos: ${(newConfig.maxAttachmentBytes / 1024 / 1024).toFixed(1)} MB`;
+
+      await interaction.reply({ content: responseMessage, ephemeral: true });
+    } catch (error) {
+      console.error('Falha ao atualizar configurações do bot:', error);
+      await interaction.reply({
+        content: 'Não foi possível salvar as configurações. Tente novamente mais tarde.',
+        ephemeral: true,
+      });
+    }
+  }
+}
 
 client.on(Events.Error, error => {
   console.error('Erro do cliente Discord:', error);

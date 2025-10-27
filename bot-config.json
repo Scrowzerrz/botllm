@@ -1,0 +1,4 @@
+{
+  "rateLimitMs": 10000,
+  "maxAttachmentBytes": 8388608
+}
