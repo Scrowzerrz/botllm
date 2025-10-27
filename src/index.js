@@ -12,12 +12,18 @@ const {
 } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { commands, attachmentOptionNames } = require('./commands');
-const { getConfig, updateConfig } = require('./config-store');
+const {
+  getGuildConfig,
+  setGuildConfig,
+  getGlobalConfig,
+  setGlobalConfig,
+} = require('./config-store');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
+const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
 
 if (!DISCORD_TOKEN) {
   console.error('Configure a variavel de ambiente DISCORD_TOKEN antes de iniciar.');
@@ -32,6 +38,69 @@ if (!GEMINI_API_KEY) {
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+const DEFAULT_RATE_LIMIT_MS = 10000;
+
+function resolveRateLimitMsFromEnv() {
+  const parsePositive = value => {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return null;
+    }
+
+    return parsed;
+  };
+
+  const secondsFromEnv = parsePositive(process.env.BOT_RATE_LIMIT_SECONDS);
+  if (secondsFromEnv !== null) {
+    return Math.round(secondsFromEnv * 1000);
+  }
+
+  const millisecondsFromEnv = parsePositive(process.env.BOT_RATE_LIMIT_MS);
+  if (millisecondsFromEnv !== null) {
+    return Math.round(millisecondsFromEnv);
+  }
+
+  return DEFAULT_RATE_LIMIT_MS;
+}
+
+const ENV_RATE_LIMIT_MS = resolveRateLimitMsFromEnv();
+
+let currentRateLimitMs = ENV_RATE_LIMIT_MS;
+
+try {
+  const globalConfig = getGlobalConfig();
+  if (Number.isFinite(globalConfig.rateLimitMs) && globalConfig.rateLimitMs >= 0) {
+    currentRateLimitMs = globalConfig.rateLimitMs;
+  } else {
+    setGlobalConfig({ rateLimitMs: currentRateLimitMs });
+  }
+} catch (error) {
+  console.warn('Falha ao carregar configuração global, usando padrão em memória:', error);
+}
+
+function getRateLimitMs() {
+  return currentRateLimitMs;
+}
+
+function updateRateLimitMs(nextValue) {
+  currentRateLimitMs = nextValue;
+  try {
+    setGlobalConfig({ rateLimitMs: nextValue });
+  } catch (error) {
+    console.error('Não foi possível persistir o novo rate limit:', error);
+  }
+}
+
+if (!BOT_OWNER_ID) {
+  console.warn(
+    'Defina BOT_OWNER_ID para permitir que o dono do bot altere o rate limit em tempo de execução.'
+  );
+}
 
 // Armazena o historico de conversa por canal/dm para manter contexto curto.
 const conversationHistories = new Map();
@@ -132,8 +201,9 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 async function handleChatCommand(interaction) {
-  const config = getConfig();
-  const { rateLimitMs, maxAttachmentBytes } = config;
+  const guildConfig = getGuildConfig(interaction.guildId);
+  const { maxAttachmentBytes } = guildConfig;
+  const rateLimitMs = getRateLimitMs();
 
   const prompt = (interaction.options.getString('mensagem') || '').trim();
   const pesquisaWeb = interaction.options.getString('pesquisa_web');
@@ -285,10 +355,20 @@ async function handleChatCommand(interaction) {
 async function handleConfigureCommand(interaction) {
   const memberPermissions = interaction.memberPermissions;
   const hasAdminPermission = memberPermissions?.has(PermissionFlagsBits.Administrator);
+  const rateLimitMs = getRateLimitMs();
+  const isOwner = BOT_OWNER_ID && interaction.user.id === BOT_OWNER_ID;
 
-  if (!hasAdminPermission) {
+  if (!hasAdminPermission && !isOwner) {
     await interaction.reply({
       content: 'Apenas administradores podem alterar as configurações do bot.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!interaction.guildId) {
+    await interaction.reply({
+      content: 'Este comando só pode ser usado dentro de servidores.',
       ephemeral: true,
     });
     return;
@@ -297,65 +377,38 @@ async function handleConfigureCommand(interaction) {
   const subcommand = interaction.options.getSubcommand();
 
   if (subcommand === 'ver') {
-    const config = getConfig();
+    const guildConfig = getGuildConfig(interaction.guildId);
     const summary =
-      `Intervalo mínimo entre mensagens: ${(config.rateLimitMs / 1000).toFixed(1)}s\n` +
-      `Tamanho máximo dos anexos: ${(config.maxAttachmentBytes / 1024 / 1024).toFixed(1)} MB`;
+      `Intervalo mínimo entre mensagens (definido pelo dono do bot): ${(rateLimitMs / 1000).toFixed(1)}s\n` +
+      `Tamanho máximo dos anexos neste servidor: ${(guildConfig.maxAttachmentBytes / 1024 / 1024).toFixed(1)} MB`;
 
     await interaction.reply({ content: summary, ephemeral: true });
     return;
   }
 
   if (subcommand === 'definir') {
-    const currentConfig = getConfig();
-    const intervalSeconds = interaction.options.getInteger('intervalo_segundos');
     const maxAttachmentMb = interaction.options.getNumber('tamanho_max_mb');
 
-    if (intervalSeconds === null && maxAttachmentMb === null) {
+    if (maxAttachmentMb === null) {
       await interaction.reply({
-        content: 'Informe pelo menos um parâmetro para atualizar (intervalo ou tamanho máximo).',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    const updates = {};
-    let rateLimitChanged = false;
-
-    if (intervalSeconds !== null) {
-      const nextRateLimitMs = intervalSeconds * 1000;
-      if (nextRateLimitMs !== currentConfig.rateLimitMs) {
-        updates.rateLimitMs = nextRateLimitMs;
-        rateLimitChanged = true;
-      }
-    }
-
-    if (maxAttachmentMb !== null) {
-      const nextMaxBytes = Math.round(maxAttachmentMb * 1024 * 1024);
-      if (nextMaxBytes !== currentConfig.maxAttachmentBytes) {
-        updates.maxAttachmentBytes = nextMaxBytes;
-      }
-    }
-
-    if (Object.keys(updates).length === 0) {
-      await interaction.reply({
-        content: 'Os valores informados são iguais aos atuais; nada foi alterado.',
+        content: 'Informe o tamanho máximo permitido para anexos (em megabytes).',
         ephemeral: true,
       });
       return;
     }
 
     try {
-      const newConfig = updateConfig(updates);
-
-      if (rateLimitChanged) {
-        cooldowns.clear();
-      }
+      const nextMaxBytes = Math.round(maxAttachmentMb * 1024 * 1024);
+      const newConfig = setGuildConfig(interaction.guildId, {
+        maxAttachmentBytes: nextMaxBytes,
+      });
 
       const responseMessage =
         'Configurações atualizadas com sucesso:\n' +
-        `• Intervalo mínimo: ${(newConfig.rateLimitMs / 1000).toFixed(1)}s\n` +
+        `• Intervalo mínimo: ${(rateLimitMs / 1000).toFixed(1)}s (definido pelo dono do bot)\n` +
         `• Tamanho máximo dos anexos: ${(newConfig.maxAttachmentBytes / 1024 / 1024).toFixed(1)} MB`;
+
+      cooldowns.clear();
 
       await interaction.reply({ content: responseMessage, ephemeral: true });
     } catch (error) {
@@ -365,6 +418,40 @@ async function handleConfigureCommand(interaction) {
         ephemeral: true,
       });
     }
+    return;
+  }
+
+  if (subcommand === 'definir_ratelimit') {
+    if (!isOwner) {
+      await interaction.reply({
+        content: 'Somente o dono do bot pode alterar o rate limit global.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const intervalSeconds = interaction.options.getNumber('intervalo_segundos');
+
+    if (intervalSeconds === null || intervalSeconds === undefined) {
+      await interaction.reply({
+        content: 'Informe o intervalo desejado em segundos.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const nextRateLimitMs = Math.max(0, Math.round(intervalSeconds * 1000));
+
+    updateRateLimitMs(nextRateLimitMs);
+    cooldowns.clear();
+
+    await interaction.reply({
+      content:
+        'Rate limit atualizado com sucesso:\n' +
+        `• Novo intervalo mínimo: ${(nextRateLimitMs / 1000).toFixed(1)}s\n` +
+        '• Este valor é aplicado globalmente a todos os servidores.',
+      ephemeral: true,
+    });
   }
 }
 

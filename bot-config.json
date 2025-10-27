@@ -1,4 +1,6 @@
 {
-  "rateLimitMs": 10000,
-  "maxAttachmentBytes": 8388608
+  "global": {
+    "rateLimitMs": null
+  },
+  "guilds": {}
 }
