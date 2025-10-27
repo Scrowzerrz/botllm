@@ -58,22 +58,27 @@ const adminConfigCommand = new SlashCommandBuilder()
   .addSubcommand(subcommand =>
     subcommand
       .setName('definir')
-      .setDescription('Atualiza limites como intervalo mínimo e tamanho máximo de anexos.')
-      .addIntegerOption(option =>
-        option
-          .setName('intervalo_segundos')
-          .setDescription('Tempo mínimo entre mensagens de um mesmo usuário.')
-          .setRequired(false)
-          .setMinValue(1)
-          .setMaxValue(3600)
-      )
+      .setDescription('Atualiza o tamanho máximo permitido para anexos neste servidor.')
       .addNumberOption(option =>
         option
           .setName('tamanho_max_mb')
           .setDescription('Tamanho máximo permitido para anexos (em megabytes).')
-          .setRequired(false)
+          .setRequired(true)
           .setMinValue(1)
           .setMaxValue(100)
+      ),
+  )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('definir_ratelimit')
+      .setDescription('Atualiza o intervalo mínimo entre mensagens para todo o bot.')
+      .addNumberOption(option =>
+        option
+          .setName('intervalo_segundos')
+          .setDescription('Tempo mínimo (em segundos) entre mensagens por usuário.')
+          .setRequired(true)
+          .setMinValue(0)
+          .setMaxValue(600)
       ),
   );
 
