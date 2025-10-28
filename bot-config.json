@@ -1,4 +1,6 @@
 {
   "rateLimitMs": 10000,
-  "maxAttachmentBytes": 8388608
+  "maxAttachmentBytes": 8388608,
+  "chatEnabled": true,
+  "apiKeys": []
 }
