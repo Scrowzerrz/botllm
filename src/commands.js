@@ -49,33 +49,9 @@ attachmentOptions.forEach(({ name, description }) => {
 
 const adminConfigCommand = new SlashCommandBuilder()
   .setName('configurar')
-  .setDescription('Gerencie limites e preferências do bot.')
+  .setDescription('Abra o painel de configuração do bot.')
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  .setDMPermission(false)
-  .addSubcommand(subcommand =>
-    subcommand.setName('ver').setDescription('Mostra as configurações atuais do bot.'),
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('definir')
-      .setDescription('Atualiza limites como intervalo mínimo e tamanho máximo de anexos.')
-      .addIntegerOption(option =>
-        option
-          .setName('intervalo_segundos')
-          .setDescription('Tempo mínimo entre mensagens de um mesmo usuário.')
-          .setRequired(false)
-          .setMinValue(1)
-          .setMaxValue(3600)
-      )
-      .addNumberOption(option =>
-        option
-          .setName('tamanho_max_mb')
-          .setDescription('Tamanho máximo permitido para anexos (em megabytes).')
-          .setRequired(false)
-          .setMinValue(1)
-          .setMaxValue(100)
-      ),
-  );
+  .setDMPermission(false);
 
 const commands = [chatCommand.toJSON(), adminConfigCommand.toJSON()];
 

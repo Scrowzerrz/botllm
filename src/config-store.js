@@ -6,6 +6,8 @@ const CONFIG_PATH = path.join(__dirname, '..', 'bot-config.json');
 const DEFAULT_CONFIG = {
   rateLimitMs: 10000,
   maxAttachmentBytes: 8 * 1024 * 1024,
+  chatEnabled: true,
+  apiKeys: [],
 };
 
 let cachedConfig = null;
@@ -20,6 +22,16 @@ function sanitizeConfig(config) {
 
     if (Number.isFinite(config.maxAttachmentBytes) && config.maxAttachmentBytes >= 1024) {
       sanitized.maxAttachmentBytes = Math.round(config.maxAttachmentBytes);
+    }
+
+    if (typeof config.chatEnabled === 'boolean') {
+      sanitized.chatEnabled = config.chatEnabled;
+    }
+
+    if (Array.isArray(config.apiKeys)) {
+      sanitized.apiKeys = config.apiKeys
+        .map(apiKey => (typeof apiKey === 'string' ? apiKey.trim() : ''))
+        .filter(Boolean);
     }
   }
 
@@ -83,9 +95,56 @@ function updateConfig(partialConfig) {
     if (Number.isFinite(partialConfig.maxAttachmentBytes)) {
       merged.maxAttachmentBytes = Math.max(1024, Math.round(partialConfig.maxAttachmentBytes));
     }
+
+    if (typeof partialConfig.chatEnabled === 'boolean') {
+      merged.chatEnabled = partialConfig.chatEnabled;
+    }
+
+    if (Array.isArray(partialConfig.apiKeys)) {
+      merged.apiKeys = partialConfig.apiKeys
+        .map(apiKey => (typeof apiKey === 'string' ? apiKey.trim() : ''))
+        .filter(Boolean);
+    }
   }
 
   return setConfig(merged);
+}
+
+function addApiKey(apiKey) {
+  const trimmed = typeof apiKey === 'string' ? apiKey.trim() : '';
+
+  if (!trimmed) {
+    throw new Error('A chave da API não pode ser vazia.');
+  }
+
+  ensureConfigLoaded();
+
+  if (cachedConfig.apiKeys.includes(trimmed)) {
+    throw new Error('Esta chave da API já está cadastrada.');
+  }
+
+  const updated = { ...cachedConfig, apiKeys: [...cachedConfig.apiKeys, trimmed] };
+  return setConfig(updated);
+}
+
+function removeApiKeyAt(index) {
+  ensureConfigLoaded();
+
+  const numericIndex = Number(index);
+
+  if (!Number.isInteger(numericIndex)) {
+    throw new Error('Índice inválido para remoção da chave da API.');
+  }
+
+  if (numericIndex < 0 || numericIndex >= cachedConfig.apiKeys.length) {
+    throw new Error('Nenhuma chave da API encontrada na posição informada.');
+  }
+
+  const nextKeys = [...cachedConfig.apiKeys];
+  const [removed] = nextKeys.splice(numericIndex, 1);
+
+  const updated = { ...cachedConfig, apiKeys: nextKeys };
+  return { config: setConfig(updated), removedApiKey: removed };
 }
 
 module.exports = {
@@ -93,4 +152,6 @@ module.exports = {
   DEFAULT_CONFIG,
   getConfig,
   updateConfig,
+  addApiKey,
+  removeApiKeyAt,
 };
